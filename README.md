@@ -41,7 +41,7 @@ The core of it is the habit I kept coming back to: when a branch looked done, I'
 - The [Codex CLI](https://developers.openai.com/codex), signed in. TheNitPick calls the Review Agent skill (`$review-agent`) that ships with Codex.
 - git
 - Python 3.9 or later (standard library only)
-- Linux, macOS, or Windows 11 (see [Platforms](#platforms))
+- Linux, macOS, or Windows 11 via WSL2. Native Windows is experimental (see [Platforms](#platforms)).
 
 ## Install
 
@@ -93,7 +93,8 @@ High effort is a deliberate default. In my experience xhigh costs a lot more wit
 ## Platforms
 
 - **Linux and macOS:** supported natively.
-- **Windows 11:** WSL2 is recommended, and behaves exactly like Linux. Native Windows also works:
+- **Windows 11: use WSL2.** Run Claude Code, git and Codex inside WSL2, where TheNitPick behaves exactly as on Linux.
+- **Native Windows: experimental.** The Windows-specific code paths (junctions, reparse points, `codex.cmd` shims, Win32 filename rules) have been reviewed and unit-tested with Windows simulated, but never run on a real Windows machine. Expect rough edges, and please open an issue if you try it. Known differences:
   - use `py -3` where the docs say `python3`;
   - without Developer Mode, symlinks in the reviewed tree are written as small text files, git's own `core.symlinks=false` behaviour;
   - edit detection compares content but not file modes;

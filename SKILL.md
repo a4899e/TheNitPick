@@ -14,7 +14,7 @@ Finish review before the branch reaches the remote. Three goals:
 - `scripts/metrics.py` writes to the metrics database and its findings ledger.
 - `scripts/codex_review.py` runs one locked-down Codex cycle, using `scripts/materialize.py` to build the review worktree.
 
-Everything is standard-library Python (3.9+) plus git and the Codex CLI. It runs on Linux, macOS and Windows 11. The commands below say `python3 -I`; on Windows, use `py -3 -I`. See "Platforms".
+Everything is standard-library Python (3.9+) plus git and the Codex CLI. It runs on Linux and macOS, and on Windows 11 through WSL2. Native Windows is experimental. The commands below say `python3 -I`; on native Windows, use `py -3 -I`. See "Platforms".
 
 ## The loop
 
@@ -140,9 +140,9 @@ Run the wrapper in the background; a cycle takes several minutes. The output fil
 ## Platforms
 
 - **Linux and macOS:** supported natively. On macOS, the Codex sandbox uses Seatbelt; on Linux, Landlock and seccomp.
-- **Windows 11:** two options.
-  - **WSL2 (recommended).** Run Claude Code, git and Codex inside WSL2. It behaves exactly like Linux.
-  - **Native Windows.** The scripts run unchanged. Three differences:
+- **Windows 11:** use WSL2.
+  - **WSL2 (recommended, supported).** Run Claude Code, git and Codex inside WSL2. It behaves exactly like Linux.
+  - **Native Windows (experimental).** The Windows-specific handling has been reviewed and unit-tested with Windows simulated, but never run on a real Windows machine. If the user is on native Windows, say so before the first run and suggest WSL2. Known differences:
     - Use `py -3 -I` for `python3 -I`.
     - Without Developer Mode, symlinks in the reviewed tree are written as small files holding the link text (git's own `core.symlinks=false` behaviour), and `--link` uses a directory junction.
     - Edit detection compares content only, not file modes.
