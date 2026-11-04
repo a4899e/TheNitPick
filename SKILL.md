@@ -10,9 +10,11 @@ Finish review before the branch reaches the remote. Three goals:
 - **Speed.** No human waits while someone starts Codex by hand.
 - **Cost.** Run CI once per PR, not once per review round. CI runners cost time and money.
 
-`SKILL_DIR` means the directory containing this file. It holds two scripts:
+`SKILL_DIR` means the directory containing this file. It holds three scripts:
 - `scripts/metrics.py` writes to the metrics database and its findings ledger.
-- `scripts/codex-review.sh` runs one locked-down Codex cycle.
+- `scripts/codex_review.py` runs one locked-down Codex cycle, using `scripts/materialize.py` to build the review worktree.
+
+Everything is standard-library Python (3.9+) plus git and the Codex CLI. It runs on Linux and macOS, and on Windows 11 through WSL2. Native Windows is experimental. The commands below say `python3 -I`; on native Windows, use `py -3 -I`. See "Platforms".
 
 ## The loop
 
@@ -23,7 +25,7 @@ Finish review before the branch reaches the remote. Three goals:
    ```
    Keep the returned run ID for every later call. Every `metrics.py` command prints JSON.
 
-   `<base>` is the branch the PR will target, normally `origin/main`. On a repo whose default branch is something else (`origin/master`, `origin/develop`), use that branch everywhere this skill says `origin/main`, and pass it as `--base` to `codex-review.sh`.
+   `<base>` is the branch the PR will target, normally `origin/main`. On a repo whose default branch is something else (`origin/master`, `origin/develop`), use that branch everywhere this skill says `origin/main`, and pass it as `--base` to `codex_review.py`.
 3. **Self-review once, before the first commit.**
    - Wrap the review in `cycle-start --run <id> --reviewer code-review --model <claude model> --effort high` / `cycle-end --cycle <id> --tokens <n>`. `<n>` is the `subagent_tokens` figure in `/code-review`'s completion notice.
    - Run `/code-review high` on the working tree, without `--comment`.
@@ -34,7 +36,7 @@ Finish review before the branch reaches the remote. Three goals:
 4. **Commit.** Every pre-commit hook must pass. Never use `--no-verify`. Never start Codex on a commit whose hooks failed.
 5. **Codex review, cycle N.**
    - Wrap it in `cycle-start --run <id> --reviewer codex --model gpt-6.1-sol --effort high --sha <HEAD>` / `cycle-end --cycle <id> --tokens <n>`. `<n>` is the `=== tokens=` line the wrapper appends to the output file, taken from Codex's own `tokens used` total.
-   - Run `scripts/codex-review.sh` (see "Running Codex").
+   - Run `scripts/codex_review.py` (see "Running Codex").
    - Each cycle reviews the whole branch against the base, never just the newest commit, because a fix can break code it didn't touch.
    - Codex never sees the ledger. It stays fresh and blind. Earlier findings appear only as a list of commit SHAs, each with a one-line description, which Claude writes into `--context-file`.
 6. **Triage each finding** (see "Verifying and settling findings").
@@ -92,7 +94,7 @@ Claude both wrote the code and judges the findings, so decide on evidence, not j
 - **Re-rate severity** by actual user harm after reproducing, rather than keeping Codex's tag. LLM severity labels are noisy, and subtle bugs can carry low labels. The ledger keeps both labels.
 - **Decline only on evidence.** Use one of:
   - **(a) A failed reproduction attempt.** Record what was tried in the reason file.
-  - **(b) A Codex re-check.** Run `codex-review.sh --recheck-file <file>`. This is a targeted confirm-or-contest run, not a full review.
+  - **(b) A Codex re-check.** Run `codex_review.py --recheck-file <file>`. This is a targeted confirm-or-contest run, not a full review.
     - Write the file with the file-writing tool.
     - Restate the claim and the evidence for declining it **in Claude's own words**, with file and line references. Never paste reviewer output into it.
     - Codex answers CONFIRMED or REFUTED, with the code, command and output that settles it.
@@ -106,11 +108,12 @@ Claude both wrote the code and judges the findings, so decide on evidence, not j
 
 Use the wrapper. Don't call `codex` by hand.
 ```
-"$SKILL_DIR/scripts/codex-review.sh" --repo <repo dir> --ref <branch or SHA> \
+python3 -I "$SKILL_DIR/scripts/codex_review.py" --repo <repo dir> --ref <branch or SHA> \
   --out "$SCRATCH/codex-<pr>-c<N>.txt" [--base <base>] [--context-file ctx.txt] [--link .venv]
 ```
 
 - `--base` defaults to `origin/main`.
+- `--codex` selects the Codex binary. The default is `$THENITPICK_CODEX`, then `codex` on `PATH`, then the copy bundled with the ChatGPT desktop app on Linux.
 - `--context-file` and `--recheck-file` hold only text Claude wrote. They reach Codex as part of the prompt.
 - `--link` exposes the project's test runtime, for example `.venv`, by symlinking it from the main checkout. The wrapper refuses if the reviewed tree already has that path, since a tracked symlink there would redirect the link outside the worktree.
   - **Editable installs.** If that venv holds an editable install of the project (a `pip install -e .` .pth or `direct_url.json` pointing at the main checkout), code run in the worktree imports the *main checkout*, not the code under review. The wrapper prints a warning when it detects this. Then either rely on the project's own path setup (for example a conftest that puts the worktree's source first), or give Codex a venv built inside the worktree.
@@ -120,7 +123,7 @@ The wrapper:
 - **Isolates the review without running git checkout.** It registers a throwaway worktree beside the output file, with no checkout. `scripts/materialize.py` then writes every file byte-for-byte from git's raw objects, so no hook, attribute (from `.gitattributes`, `core.attributesFile` or `info/attributes`), or smudge/process filter ever runs on branch content on the host. Nothing is written through a symlink. Codex gets a per-run `TMPDIR`, and everything is removed afterwards.
 - **Pins agent instructions to the base.** `AGENTS.md`, `AGENTS.override.md` and `CLAUDE.md` (anywhere in the tree), and `.codex`, `.agents` and `.claude` at the root (directories or symlinks), come from the base branch. They are omitted if the base has none. A symlinked one is resolved as a path in the base tree, and is omitted with a warning if it can't be safely resolved. A base that doesn't resolve stops the run. Codex loads these from its working tree automatically, so a branch could otherwise rewrite its own reviewer's instructions; a published prompt-injection attack (Ghostcommit) used exactly that path. Committed changes to these files are still reviewed.
 - **Locks Codex down.**
-  - It runs with an emptied environment: only `HOME`, `PATH`, `LANG` and `TERM`, so no cloud or API credentials pass through.
+  - It runs with a minimal environment: `HOME`, `PATH`, `LANG`, `TERM`, `CODEX_HOME` if set, a private temp directory and, on Windows, the system variables a program needs to start. No cloud or API credentials pass through.
   - The sandbox is `workspace-write` with network off.
   - `--ignore-user-config` drops your config's plugins.
   - `--ignore-rules` stops user and project execpolicy rules from loading.
@@ -128,11 +131,23 @@ The wrapper:
   - Auto-approval is never enabled.
 - **Uses the agreed model.** gpt-6.1-sol at high effort, via `-m` and `-c model_reasoning_effort`. The user chose high over xhigh because xhigh costs a lot more without adding much. Ask before using xhigh for a particularly risky change.
 - **Uses the Review Agent.** It invokes Codex's `$review-agent` skill (`~/.codex/skills/.system/review-agent/`), which Codex never invokes implicitly. The prompt points Codex at the committed diff and `CLAUDE.md`, and asks for the exact command and output behind any finding that came from running code.
-- **Reports Codex's edits.** After the run, it appends every file Codex created or changed in the worktree to the output file. Gitignored files are included. Only interpreter caches (`__pycache__`, `.pytest_cache`) are exempt.
+- **Reports Codex's edits.** After the run, it appends every file Codex created, changed or deleted in the worktree to the output file. It compares content hashes, plus file modes on Linux and macOS. Gitignored files are included. Only interpreter caches (`__pycache__`, `.pytest_cache`) are exempt.
   - The sandbox limits writes to the worktree and temp directories, so Codex can't write through a `--link` symlink into the main checkout.
   - Treat any reported change as a warning sign: read it, and never carry it over.
 
-Run the wrapper in the background; a cycle takes several minutes. The verdict is at the end of the output file, after the transcript. Each finding has the form `[P1] Title — path:line`.
+Run the wrapper in the background; a cycle takes several minutes. The output file ends with `=== tokens=N` and a status line. The verdict is at the end of the output file, after the transcript. Each finding has the form `[P1] Title — path:line`.
+
+## Platforms
+
+- **Linux and macOS:** supported natively. On macOS, the Codex sandbox uses Seatbelt; on Linux, Landlock and seccomp.
+- **Windows 11:** use WSL2.
+  - **WSL2 (recommended, supported).** Run Claude Code, git and Codex inside WSL2. It behaves exactly like Linux.
+  - **Native Windows (experimental, opt-in).** `codex_review.py` refuses to run unless `THENITPICK_EXPERIMENTAL_WINDOWS=1` is set. The Windows-specific handling has been reviewed and unit-tested with Windows simulated, but never run on a real Windows machine, and the README lists known open issues, including an NTFS 8.3 short-name bypass of instruction pinning. If the user is on native Windows, say so before the first run and suggest WSL2. Known differences:
+    - Use `py -3 -I` for `python3 -I`.
+    - Without Developer Mode, symlinks in the reviewed tree are written as small files holding the link text (git's own `core.symlinks=false` behaviour), and `--link` uses a directory junction.
+    - Edit detection compares content only, not file modes.
+
+    How strong the sandbox is depends on Codex's own native-Windows sandbox, so check Codex's documentation for your version.
 
 ## Why two reviewers
 
