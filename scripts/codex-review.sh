@@ -23,9 +23,10 @@
 #        - memories disabled
 #        - --ephemeral (no session persisted)
 #        - the given model and effort
-#   4. Afterwards appends to OUT every file Codex created or changed in the
-#      worktree, ignored files included, then deletes the worktree (unless
-#      --keep).
+#   4. Afterwards appends to OUT every file Codex created, changed or deleted
+#      in the worktree (a content-hash comparison, ignored files included),
+#      then deletes the worktree (unless --keep).
+#   All git commands on the worktree run with hooks and fsmonitor disabled.
 #
 # Two modes:
 #   default         A full review of REF against BASE. --context-file adds
@@ -71,14 +72,21 @@ mkdir -p "$(dirname "$OUT")"
 OUT="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
 WT="$(dirname "$OUT")/wt-$(basename "$OUT" .txt)"
 LISTS=$(mktemp -d)
+if command -v sha256sum > /dev/null; then SHA=(sha256sum); else SHA=(shasum -a 256); fi
 
-if [[ $BASE == origin/* ]]; then git -C "$REPO" fetch -q origin "${BASE#origin/}"; fi
-git -C "$REPO" rev-parse -q --verify "$BASE^{commit}" > /dev/null \
+# Every git command that touches the worktree runs with hooks and fsmonitor
+# off. A repo whose core.hooksPath points at a tracked directory would
+# otherwise run the reviewed branch's own post-checkout hook here, before any
+# pinning, scrubbing or sandboxing.
+g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
+
+if [[ $BASE == origin/* ]]; then g -C "$REPO" fetch -q origin "${BASE#origin/}"; fi
+g -C "$REPO" rev-parse -q --verify "$BASE^{commit}" > /dev/null \
   || { echo "base $BASE does not resolve to a commit" >&2; exit 2; }
-git -C "$REPO" worktree add -q --detach "$WT" "$REF"
+g -C "$REPO" worktree add -q --detach "$WT" "$REF"
 cleanup() {
   rm -rf "$LISTS"
-  [[ $KEEP == 1 ]] || git -C "$REPO" worktree remove --force "$WT"
+  [[ $KEEP == 1 ]] || g -C "$REPO" worktree remove --force "$WT"
 }
 trap cleanup EXIT
 
@@ -91,15 +99,32 @@ pinned() {  # NUL-separated paths in, the pinned ones out
     if [[ $path =~ $PINNED ]]; then printf '%s\0' "$path"; fi
   done
 }
-git -C "$WT" ls-files -z > "$LISTS/head"
-git -C "$WT" ls-tree -r -z --name-only "$BASE" > "$LISTS/base"
+g -C "$WT" ls-files -z > "$LISTS/head"
+g -C "$WT" ls-tree -r -z --name-only "$BASE" > "$LISTS/base"
 pinned < "$LISTS/head" > "$LISTS/head-pinned"
 pinned < "$LISTS/base" > "$LISTS/base-pinned"
 while IFS= read -r -d '' path; do rm -rf -- "${WT:?}/$path"; done < "$LISTS/head-pinned"
-while IFS= read -r -d '' path; do git -C "$WT" checkout -q "$BASE" -- "$path"; done \
+while IFS= read -r -d '' path; do g -C "$WT" checkout -q "$BASE" -- "$path"; done \
   < "$LISTS/base-pinned"
 
+# A pinned file that is a symlink on BASE (AGENTS.md -> RULES.md) would still
+# deliver the branch's version of its target. Replace each such link with the
+# target's content as of BASE. Fail closed (delete it, and warn) when the
+# target leaves the repo, is itself a link, or is absent on BASE.
 WARNINGS=""
+while IFS= read -r -d '' path; do
+  [[ -L "$WT/$path" ]] || continue
+  dest=$(readlink "$WT/$path")
+  rel=$(realpath -m --relative-to="$WT" "$(dirname "$WT/$path")/$dest" 2>/dev/null || echo "../")
+  mode=$(g -C "$WT" ls-tree "$BASE" -- "$rel" | awk '{print $1}')
+  rm -f -- "${WT:?}/$path"
+  if [[ $dest == /* || $rel == ../* || $rel == .. || $mode != 100* ]]; then
+    WARNINGS+="=== WARNING: pinned $path is a symlink to $dest, which can't be pinned from $BASE; removed it."$'\n'
+  else
+    g -C "$WT" show "$BASE:$rel" > "$WT/$path"
+  fi
+done < "$LISTS/base-pinned"
+
 for link in "${LINKS[@]}"; do
   ln -s "$REPO/$link" "$WT/$link"
   # An editable or src-layout install in a linked venv imports the main
@@ -110,7 +135,20 @@ for link in "${LINKS[@]}"; do
     WARNINGS+="=== WARNING: $link holds an editable install pointing at $REPO; code run in the worktree may import the main checkout."$'\n'
   fi
 done
-BEFORE=$(git -C "$WT" status --porcelain=v1 --ignored -z | tr '\0' '\n' | sort)
+
+# Content manifest of the worktree: a hash per file, the target per symlink,
+# plus HEAD. Comparing it before and after the run catches any edit Codex
+# makes, including ignored files and restores of pinned files.
+PRUNE=(-path ./.git -o -name __pycache__ -o -name .pytest_cache)
+for link in "${LINKS[@]}"; do PRUNE+=(-o -path "./$link"); done
+manifest() {
+  ( cd "$WT"
+    echo "HEAD $(g rev-parse HEAD)"
+    find . \( "${PRUNE[@]}" \) -prune -o -type l -printf 'L %p -> %l\n'
+    find . \( "${PRUNE[@]}" \) -prune -o -type f -print0 | xargs -0 -r "${SHA[@]}" | sed 's/^/F /'
+  ) | sort
+}
+manifest > "$LISTS/before"
 
 if [[ -n $RECHECK ]]; then
   PROMPT="Do not perform a full review. Apply the \$review-agent skill's standards for what counts \
@@ -144,18 +182,17 @@ env -i HOME="$HOME" PATH="$PATH" LANG="${LANG:-C.UTF-8}" TERM=dumb \
 STATUS=$?
 set -e
 
-# 4. Report every file Codex created or changed, ignored files included. Only
-# interpreter caches and the links this script made are exempt.
-AFTER=$(git -C "$WT" status --porcelain=v1 --ignored -z | tr '\0' '\n' | sort)
-EXEMPT='(^|/)(__pycache__|\.pytest_cache)/'
-for link in "${LINKS[@]}"; do EXEMPT+="|^(\?\?|!!) ${link}/?\$"; done
-CHANGED=$(comm -13 <(printf '%s\n' "$BEFORE") <(printf '%s\n' "$AFTER") | grep -v -E "$EXEMPT" || true)
+# 4. Report every file Codex created, changed or deleted, ignored files
+# included (manifest diff). Only interpreter caches and the --link paths are
+# exempt.
+manifest > "$LISTS/after"
+CHANGED=$(diff "$LISTS/before" "$LISTS/after" | sed -n 's/^< /removed or changed: /p; s/^> /now: /p' || true)
 {
   echo
   printf '%s' "$WARNINGS"
   # Codex prints "tokens used" then the total on the next line; pass it to metrics.py cycle-end --tokens.
   echo "=== tokens=$(awk '/^tokens used$/{getline; gsub(/,/, ""); print; exit}' "$OUT")"
-  echo "=== codex-review.sh: exit=$STATUS mode=$([[ -n $RECHECK ]] && echo recheck || echo review) ref=$(git -C "$WT" rev-parse HEAD) base=$BASE model=$MODEL effort=$EFFORT"
+  echo "=== codex-review.sh: exit=$STATUS mode=$([[ -n $RECHECK ]] && echo recheck || echo review) ref=$(g -C "$WT" rev-parse HEAD) base=$BASE model=$MODEL effort=$EFFORT"
   if [[ -n $CHANGED ]]; then echo "=== WORKTREE CHANGED BY REVIEWER:"; echo "$CHANGED"; else echo "=== worktree unchanged by reviewer"; fi
 } >> "$OUT"
 exit $STATUS
