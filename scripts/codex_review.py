@@ -267,13 +267,14 @@ def manifest(wt: Path, head: str, links: list[str]) -> list[str]:
 def restore_permissions(wt: Path) -> None:
     """Give the owner rwx on every directory, so cleanup can delete what the reviewer locked."""
     for root, dirs, _files in os.walk(wt, followlinks=False):
+        # Drop links before os.walk descends: it follows Windows junctions even
+        # with followlinks=False, which would chmod outside the worktree.
+        dirs[:] = [name for name in dirs if not is_link(Path(root) / name)]
         for name in dirs:
-            path = Path(root) / name
-            if not is_link(path):
-                try:
-                    os.chmod(path, stat.S_IRWXU)
-                except OSError:
-                    pass  # best effort; worktree removal reports what remains
+            try:
+                os.chmod(Path(root) / name, stat.S_IRWXU)
+            except OSError:
+                pass  # best effort; worktree removal reports what remains
     # One pass suffices: os.walk is top-down, so each directory is unlocked
     # before the walk lists it.
 
