@@ -139,8 +139,26 @@ def make_parents(dest: str, path: str) -> bool:
     return True
 
 
+def names_directory(path: str, target: str, tree_dirs: frozenset[str],
+                    links: dict[str, str]) -> bool:
+    """Whether a symlink at PATH to TARGET ends at a directory of the tree.
+
+    Follows chains of links within the tree (a -> b -> dir/), up to a depth
+    limit, purely as paths. Nothing on disk is consulted.
+    """
+    current = posixpath.normpath(posixpath.join(posixpath.dirname(path), target))
+    for _ in range(40):
+        if current in tree_dirs:
+            return True
+        if current not in links:
+            return False
+        current = posixpath.normpath(posixpath.join(posixpath.dirname(current), links[current]))
+    return False
+
+
 def write_entry(dest: str, path: str, mode: str, data: bytes, warnings: list[str],
-                tree_dirs: frozenset[str] = frozenset()) -> None:
+                tree_dirs: frozenset[str] = frozenset(),
+                links: dict[str, str] | None = None) -> None:
     if unsafe_path(path):
         warnings.append(f"{path!r} is not a safe path on this platform; omitted it.")
         return
@@ -158,9 +176,9 @@ def write_entry(dest: str, path: str, mode: str, data: bytes, warnings: list[str
         # Windows fixes a symlink's type (file or directory) at creation. The
         # target may not exist yet, so decide from the tree whether it names a
         # directory.
-        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(path), target))
+        is_dir = names_directory(path, target, tree_dirs, links or {})
         try:
-            os.symlink(target, full, target_is_directory=resolved in tree_dirs)
+            os.symlink(target, full, target_is_directory=is_dir)
             return
         except OSError:
             if os.name != "nt":
@@ -185,9 +203,14 @@ def materialize(repo: str, dest: str, ref: str, base: str, pinned_regex: str,
     tree_dirs = frozenset(posixpath.dirname(path) for path in head) - {""}
     tree_dirs = frozenset(prefix for path in tree_dirs
                           for prefix in _prefixes(path))
+    links: dict[str, str] = {}
     warnings: list[str] = []
     blobs = Blobs(git, repo)
     try:
+        # Symlink targets, read up front so link chains can be followed when
+        # choosing each link's type on Windows.
+        links.update({path: os.fsdecode(blobs.read(oid))
+                      for path, (mode, oid) in head.items() if mode == SYMLINK})
         # Pinned BASE files first, so they win any case-insensitive collision.
         write_pinned(dest, base, base_tree, pinned, blobs, warnings)
         for path, (mode, oid) in sorted(head.items()):
@@ -197,7 +220,7 @@ def materialize(repo: str, dest: str, ref: str, base: str, pinned_regex: str,
                 if unsafe_path(path) or not make_parents(dest, path + "/_"):
                     warnings.append(f"submodule {path!r} can't be placed safely; omitted it.")
                 continue
-            write_entry(dest, path, mode, blobs.read(oid), warnings, tree_dirs)
+            write_entry(dest, path, mode, blobs.read(oid), warnings, tree_dirs, links)
     finally:
         blobs.close()
     return warnings

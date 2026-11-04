@@ -155,8 +155,10 @@ def make_link(source: Path, dest: Path) -> None:
         if os.name != "nt" or not source.is_dir():
             raise
         # Windows without symlink privilege: a directory junction needs none.
-        subprocess.run(["cmd", "/c", "mklink", "/J", str(dest), str(source)],
-                       check=True, capture_output=True)
+        # Created through CPython's own API, never a shell, so no path is
+        # ever parsed by cmd.exe.
+        import _winapi  # Windows-only CPython module
+        _winapi.CreateJunction(str(source), str(dest))
 
 
 def editable_install_warning(repo: Path, link: str) -> str | None:
@@ -329,7 +331,9 @@ def run(args: argparse.Namespace) -> int:
         tmpdir.mkdir()
         command = [codex, "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral",
                    "--disable", "memories", "-m", args.model,
-                   "-c", f'model_reasoning_effort="{args.effort}"',
+                   # Unquoted: Codex reads a value that isn't valid TOML as a
+                   # literal string, and a bare value stays clear of cmd.exe quoting.
+                   "-c", f"model_reasoning_effort={args.effort}",
                    "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=false",
                    "-C", str(wt), "-"]
         # The prompt goes in on stdin ("-"), never on the command line. On
@@ -384,6 +388,9 @@ def main() -> None:
     parser.add_argument("--effort", default="high")
     parser.add_argument("--keep", action="store_true")
     args = parser.parse_args()
+    for name in ("model", "effort"):
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", getattr(args, name)):
+            parser.error(f"--{name} must be a plain token (letters, digits, . _ -)")
     try:
         sys.exit(run(args))
     except ReviewError as error:
