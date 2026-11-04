@@ -143,17 +143,37 @@ def names_directory(path: str, target: str, tree_dirs: frozenset[str],
                     links: dict[str, str]) -> bool:
     """Whether a symlink at PATH to TARGET ends at a directory of the tree.
 
-    Follows chains of links within the tree (a -> b -> dir/), up to a depth
-    limit, purely as paths. Nothing on disk is consulted.
+    Resolves the target component by component, substituting any in-tree link
+    met along the way, including one used as a directory alias
+    (link -> alias/subdir). The repository root counts as a directory. Done
+    purely on tree paths, up to a link-hop limit; nothing on disk is consulted.
     """
-    current = posixpath.normpath(posixpath.join(posixpath.dirname(path), target))
-    for _ in range(40):
-        if current in tree_dirs:
-            return True
-        if current not in links:
-            return False
-        current = posixpath.normpath(posixpath.join(posixpath.dirname(current), links[current]))
-    return False
+    if target.startswith("/"):
+        return False  # absolute: outside the tree
+    pending = posixpath.join(posixpath.dirname(path), target).split("/")
+    resolved: list[str] = []
+    hops = 0
+    while pending:
+        part = pending.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not resolved:
+                return False  # leaves the repository
+            resolved.pop()
+            continue
+        candidate = "/".join(resolved + [part])
+        if candidate in links:
+            hops += 1
+            if hops > 40:
+                return False
+            pending = links[candidate].split("/") + pending
+            if links[candidate].startswith("/"):
+                return False  # absolute: outside the tree
+            continue
+        resolved.append(part)
+    final = "/".join(resolved)
+    return final == "" or final in tree_dirs
 
 
 def write_entry(dest: str, path: str, mode: str, data: bytes, warnings: list[str],

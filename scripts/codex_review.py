@@ -180,19 +180,24 @@ def editable_install_warning(repo: Path, link: str) -> str | None:
 
 
 def is_link(path: Path) -> bool:
-    """A symlink, or on Windows any reparse point such as a junction.
+    """A symlink, or on Windows a junction (mount-point reparse tag).
 
     is_symlink() misses junctions, and os.path.isjunction exists only from
-    Python 3.12, so on Windows check the reparse-point attribute directly.
+    Python 3.12, so on Windows check the reparse tag directly.
     """
     if path.is_symlink():
         return True
     if os.name == "nt":
         try:
-            attributes = getattr(path.lstat(), "st_file_attributes", 0)
+            info = path.lstat()
         except OSError:
             return False
-        return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+        # Only reparse points that redirect the path count as links. Other
+        # reparse files, such as OneDrive placeholders, are ordinary files
+        # and must be hashed.
+        tag = getattr(info, "st_reparse_tag", 0)
+        return tag in (getattr(stat, "IO_REPARSE_TAG_SYMLINK", 0xA000000C),
+                       getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003))
     return False
 
 
@@ -339,7 +344,7 @@ def run(args: argparse.Namespace) -> int:
         # The prompt goes in on stdin ("-"), never on the command line. On
         # Windows, codex.cmd runs through cmd.exe, which would cut a multi-line
         # argument at the first newline and interpret % & | in it.
-        check_batch_arguments(codex, command[1:])
+        check_batch_arguments(codex, command)  # the executable path is parsed too
         prompt = build_prompt(args.ref, args.base, context, recheck)
         with open(out, "w", encoding="utf-8") as handle:
             status = subprocess.run(command, input=prompt.encode("utf-8"), stdout=handle,
