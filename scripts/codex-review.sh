@@ -75,10 +75,19 @@ LISTS=$(mktemp -d)
 if command -v sha256sum > /dev/null; then SHA=(sha256sum); else SHA=(shasum -a 256); fi
 
 # Every git command that touches the worktree runs with hooks and fsmonitor
-# off. A repo whose core.hooksPath points at a tracked directory would
-# otherwise run the reviewed branch's own post-checkout hook here, before any
-# pinning, scrubbing or sandboxing.
-g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
+# off, and reads attributes from an empty tree. Otherwise branch code could run
+# here, before any pinning, scrubbing or sandboxing: a core.hooksPath pointing
+# at a tracked directory runs the branch's post-checkout hook, and the branch's
+# .gitattributes can route files through a configured smudge or process filter.
+# With no attributes, files are checked out byte-for-byte.
+# GIT_ATTR_SOURCE needs git 2.42 or later; older git silently ignores it.
+GIT_VERSION=$(git --version | awk '{print $3}')
+if ! printf '2.42\n%s\n' "$GIT_VERSION" | sort -V -C; then
+  echo "git $GIT_VERSION is too old: 2.42+ is needed to keep checkout filters from running" >&2
+  exit 2
+fi
+EMPTY_TREE=$(git -C "$REPO" hash-object -t tree /dev/null)
+g() { GIT_ATTR_SOURCE=$EMPTY_TREE git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
 
 if [[ $BASE == origin/* ]]; then g -C "$REPO" fetch -q origin "${BASE#origin/}"; fi
 g -C "$REPO" rev-parse -q --verify "$BASE^{commit}" > /dev/null \
@@ -112,13 +121,18 @@ while IFS= read -r -d '' path; do g -C "$WT" checkout -q "$BASE" -- "$path"; don
 # target's content as of BASE. Fail closed (delete it, and warn) when the
 # target leaves the repo, is itself a link, or is absent on BASE.
 WARNINGS=""
+# The target is resolved purely as a path in the BASE tree, never through the
+# reviewed filesystem, whose symlinks the branch controls.
 while IFS= read -r -d '' path; do
-  [[ -L "$WT/$path" ]] || continue
-  dest=$(readlink "$WT/$path")
-  rel=$(realpath -m --relative-to="$WT" "$(dirname "$WT/$path")/$dest" 2>/dev/null || echo "../")
+  [[ $(g -C "$WT" ls-tree "$BASE" -- "$path" | awk '{print $1}') == 120000 ]] || continue
+  dest=$(g -C "$WT" cat-file blob "$BASE:$path")
+  rel=$(python3 -I -c 'import posixpath, sys
+print(posixpath.normpath(posixpath.join(posixpath.dirname(sys.argv[1]), sys.argv[2])))' "$path" "$dest")
+  # A missing path or a path through a symlinked directory gives no ls-tree
+  # entry, so it fails closed below.
   mode=$(g -C "$WT" ls-tree "$BASE" -- "$rel" | awk '{print $1}')
   rm -f -- "${WT:?}/$path"
-  if [[ $dest == /* || $rel == ../* || $rel == .. || $mode != 100* ]]; then
+  if [[ $dest == /* || $rel == /* || $rel == ../* || $rel == .. || $mode != 100* ]]; then
     WARNINGS+="=== WARNING: pinned $path is a symlink to $dest, which can't be pinned from $BASE; removed it."$'\n'
   else
     g -C "$WT" show "$BASE:$rel" > "$WT/$path"
@@ -136,8 +150,8 @@ for link in "${LINKS[@]}"; do
   fi
 done
 
-# Content manifest of the worktree: a hash per file, the target per symlink,
-# plus HEAD. Comparing it before and after the run catches any edit Codex
+# Content manifest of the worktree: a hash and mode per file, the target per
+# symlink, plus HEAD. Comparing it before and after the run catches any edit Codex
 # makes, including ignored files and restores of pinned files.
 PRUNE=(-path ./.git -o -name __pycache__ -o -name .pytest_cache)
 for link in "${LINKS[@]}"; do PRUNE+=(-o -path "./$link"); done
@@ -145,6 +159,7 @@ manifest() {
   ( cd "$WT"
     echo "HEAD $(g rev-parse HEAD)"
     find . \( "${PRUNE[@]}" \) -prune -o -type l -printf 'L %p -> %l\n'
+    find . \( "${PRUNE[@]}" \) -prune -o -type f -printf 'M %m %p\n'
     find . \( "${PRUNE[@]}" \) -prune -o -type f -print0 | xargs -0 -r "${SHA[@]}" | sed 's/^/F /'
   ) | sort
 }
