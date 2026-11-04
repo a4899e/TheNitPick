@@ -197,6 +197,12 @@ def write_entry(dest: str, path: str, mode: str, data: bytes, warnings: list[str
     try:
         _create(full, path, mode, data, tree_dirs, links)
     except OSError as error:
+        # The path didn't exist before this call (checked above, and created
+        # with O_EXCL), so anything there now is this call's partial output.
+        # Remove it, so the reviewer never sees a truncated file as if it were
+        # the real one.
+        if os.path.lexists(full):
+            os.unlink(full)
         warnings.append(f"{path!r} couldn't be created here ({error.strerror}); omitted it.")
 
 

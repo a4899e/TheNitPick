@@ -94,11 +94,16 @@ High effort is a deliberate default. In my experience xhigh costs a lot more wit
 
 - **Linux and macOS:** supported natively.
 - **Windows 11: use WSL2.** Run Claude Code, git and Codex inside WSL2, where TheNitPick behaves exactly as on Linux.
-- **Native Windows: experimental.** The Windows-specific code paths (junctions, reparse points, `codex.cmd` shims, Win32 filename rules) have been reviewed and unit-tested with Windows simulated, but never run on a real Windows machine. Expect rough edges, and please open an issue if you try it. Known differences:
+- **Native Windows: experimental, opt-in.** The wrapper refuses to run on native Windows unless `THENITPICK_EXPERIMENTAL_WINDOWS=1` is set. The Windows-specific code paths (junctions, reparse points, `codex.cmd` shims, Win32 filename rules) have been reviewed and unit-tested with Windows simulated, but never run on a real Windows machine. Please open an issue if you try it. Known differences:
   - use `py -3` where the docs say `python3`;
   - without Developer Mode, symlinks in the reviewed tree are written as small text files, git's own `core.symlinks=false` behaviour;
   - edit detection compares content but not file modes;
   - how strong the sandbox is depends on Codex's native Windows sandbox.
+
+  Known open issues on native Windows:
+  - **NTFS 8.3 short names.** On volumes with 8.3 names enabled, a branch can write into a pinned instruction directory through its short alias (for example `AGENTS~1` for `.agents`), getting around instruction pinning.
+  - **Symlink type detection.** Detection ignores Windows case-insensitivity and backslash separators, so some directory symlinks are created as file symlinks.
+  - **Links to restored instruction directories.** A link to a pinned instruction directory that only exists on the base branch is created as a file symlink.
 
 ## How the isolation works
 

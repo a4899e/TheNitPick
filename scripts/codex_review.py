@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Run one Codex Review Agent cycle on a branch, isolated and locked down.
 
-Works on Linux, macOS and Windows 11 (Python 3.9+, git, Codex CLI)::
+Works on Linux and macOS, and on Windows 11 through WSL2 (Python 3.9+, git, Codex
+CLI). Native Windows is experimental and requires THENITPICK_EXPERIMENTAL_WINDOWS=1::
 
   codex_review.py --repo DIR --ref REF --out FILE [--base origin/main]
                   [--context-file FILE | --recheck-file FILE]
@@ -393,6 +394,10 @@ def main() -> None:
     parser.add_argument("--effort", default="high")
     parser.add_argument("--keep", action="store_true")
     args = parser.parse_args()
+    if os.name == "nt" and os.environ.get("THENITPICK_EXPERIMENTAL_WINDOWS") != "1":
+        parser.exit(2, "codex_review.py: native Windows is experimental (its known issues are "
+                       "listed in the README). Run TheNitPick inside WSL2, or set "
+                       "THENITPICK_EXPERIMENTAL_WINDOWS=1 to opt in.\n")
     for name in ("model", "effort"):
         if not re.fullmatch(r"[A-Za-z0-9._-]+", getattr(args, name)):
             parser.error(f"--{name} must be a plain token (letters, digits, . _ -)")
