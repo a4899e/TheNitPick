@@ -2,6 +2,32 @@
 
 A [Claude Code](https://claude.com/claude-code) skill that reviews your branch before it becomes a pull request. Claude reviews first, then Codex. Claude checks each finding, fixes the real ones with tests that show the fix works, and opens one PR when the review comes back clean.
 
+## What does this do?
+
+TheNitPick reviews your work, both the code and its design, before it becomes a pull request. Claude reviews first. Then Codex gives it a second set of eyes, so you no longer have to invoke another agent by hand to get an independent review. Claude verifies each finding, fixes the real ones with tests that prove the fix, and repeats until the review comes back clean.
+
+All of this happens after you commit but before anything is pushed. Review feedback gets addressed locally instead of through push after push of fixes, so CI runs once per PR rather than once per round of review.
+
+## Why not just ask Codex (or Claude, or Gemini, or …) to review it myself?
+
+You can, and it works. Asking another model "please review my branch" is useful, and it's how this skill started. Done by hand, though, the same few things keep slipping:
+
+- **It's ad hoc.** The prompt, the scope (the latest commit or the whole branch?), and how carefully you read the answer vary from one time to the next. TheNitPick runs the same procedure every time.
+- **You become the relay.** You start the review, wait, copy findings back, ask for fixes, then start another review. Here, Claude drives the loop and you're only pulled in to make a decision.
+- **Findings get accepted on faith, or waved away.** A model's review contains real bugs, plausible-sounding non-bugs, and severity labels that are often wrong. TheNitPick makes every fix earn its place with a reproducing test, and every rejection earn its place with evidence.
+- **Loops don't converge on their own.** "Fix it and review again" can run indefinitely, because a reviewer asked often enough always finds something. TheNitPick caps the cycles, detects repeated concerns, and hands non-convergence back to you instead of silently stopping.
+- **The reviewer can be steered by the code it reviews.** Agent-instruction files (`AGENTS.md`, `CLAUDE.md`, `.codex/`) live in the repo, and an AI reviewer reads them automatically. TheNitPick takes them from your base branch, so the branch under review can't rewrite its reviewer's instructions. It also never runs git checkout machinery (hooks, filters) on branch content.
+- **Every push can cost a CI run.** All review happens locally, so the branch is pushed once.
+- **You can't tell whether it's worth it.** The metrics database records what each reviewer found, what that cost in time and tokens, and what still slipped through.
+
+## Why this skill instead of others?
+
+You don't have to use this over anything else, or at all. There are good alternatives, from built-in reviewers (Claude Code's `/code-review` and Code Review, Codex's `/review`) to well-maintained community skill packs and plugins, several with their own review loops. If one of them works for you, keep using it.
+
+TheNitPick is distilled from about a year of building two startups and a number of personal projects with coding agents. It records what I learned about getting AI review to catch real bugs without slowing everything down.
+
+The core of it is the habit I kept coming back to: when a branch looked done, I'd invoke Codex's Review Agent by hand for an independent, defect-first read, then work through what it found. TheNitPick keeps the best parts of that: an independent model, findings limited to concrete and actionable defects, and the full branch as the scope. It drops the need to invoke and shepherd the review yourself, and adds the verification, loop control, isolation and record-keeping that doing it by hand never quite got.
+
 ## How to use it
 
 Install it (see [Install](#install)), then use one of the two prompts below. You never need to commit, push or start a reviewer by hand. Claude does all of that, and asks you only when a finding needs your judgment.
@@ -65,26 +91,6 @@ When the change is ready, TheNitPick runs a review loop on your machine, before 
 6. **One push, one PR**, with a single "review packet" comment: every finding, how it was resolved, the fixing commit, and what wasn't verified.
 
 Every run is logged to a local SQLite database: time spent, tokens used, findings by severity and outcome, and bugs that escaped review. Over time you can see whether the loop pays for itself.
-
-## Why not just ask Codex (or Claude, or Gemini, or …) to review it myself?
-
-You can, and it works. Asking another model "please review my branch" is useful, and it's how this skill started. Done by hand, though, the same few things keep slipping:
-
-- **It's ad hoc.** The prompt, the scope (the latest commit or the whole branch?), and how carefully you read the answer vary from one time to the next. TheNitPick runs the same procedure every time.
-- **You become the relay.** You start the review, wait, copy findings back, ask for fixes, then start another review. Here, Claude drives the loop and you're only pulled in to make a decision.
-- **Findings get accepted on faith, or waved away.** A model's review contains real bugs, plausible-sounding non-bugs, and severity labels that are often wrong. TheNitPick makes every fix earn its place with a reproducing test, and every rejection earn its place with evidence.
-- **Loops don't converge on their own.** "Fix it and review again" can run indefinitely, because a reviewer asked often enough always finds something. TheNitPick caps the cycles, detects repeated concerns, and hands non-convergence back to you instead of silently stopping.
-- **The reviewer can be steered by the code it reviews.** Agent-instruction files (`AGENTS.md`, `CLAUDE.md`, `.codex/`) live in the repo, and an AI reviewer reads them automatically. TheNitPick takes them from your base branch, so the branch under review can't rewrite its reviewer's instructions. It also never runs git checkout machinery (hooks, filters) on branch content.
-- **Every push can cost a CI run.** All review happens locally, so the branch is pushed once.
-- **You can't tell whether it's worth it.** The metrics database records what each reviewer found, what that cost in time and tokens, and what still slipped through.
-
-## Why this skill instead of others?
-
-You don't have to use this over anything else, or at all. There are good alternatives, from built-in reviewers (Claude Code's `/code-review` and Code Review, Codex's `/review`) to well-maintained community skill packs and plugins, several with their own review loops. If one of them works for you, keep using it.
-
-TheNitPick is distilled from about a year of building two startups and a number of personal projects with coding agents. It records what I learned about getting AI review to catch real bugs without slowing everything down.
-
-The core of it is the habit I kept coming back to: when a branch looked done, I'd invoke Codex's Review Agent by hand for an independent, defect-first read, then work through what it found. TheNitPick keeps the best parts of that: an independent model, findings limited to concrete and actionable defects, and the full branch as the scope. It drops the need to invoke and shepherd the review yourself, and adds the verification, loop control, isolation and record-keeping that doing it by hand never quite got.
 
 ## Requirements
 
