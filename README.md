@@ -130,6 +130,10 @@ These protections were hardened by running TheNitPick on itself. See PR #1. Code
 - `scripts/materialize.py`: builds the review worktree from raw git objects.
 - `scripts/metrics.py`: the metrics database and findings ledger.
 
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
+
 ## Future ideas
 
 Not built yet. These are directions I may take TheNitPick, recorded here so the reasoning isn't lost.
