@@ -73,7 +73,7 @@ class Blobs:
 
 
 def make_parents(dest: str, path: str) -> bool:
-    """Create PATH's parent directories under DEST, refusing to pass through a symlink.
+    """Create PATH's parent directories under DEST. False on a symlink or file in the way.
 
     O_NOFOLLOW guards only the last component. Without this check, a pinned base
     path under a directory the branch tracks as a symlink would be written
@@ -84,7 +84,9 @@ def make_parents(dest: str, path: str) -> bool:
         current = os.path.join(current, part)
         if os.path.islink(current):
             return False
-        if not os.path.isdir(current):
+        if os.path.lexists(current) and not os.path.isdir(current):
+            return False  # the branch put a regular file where BASE has a directory
+        if not os.path.lexists(current):
             os.mkdir(current)
     return True
 
@@ -92,7 +94,8 @@ def make_parents(dest: str, path: str) -> bool:
 def write_entry(dest: str, path: str, mode: str, data: bytes) -> None:
     full = os.path.join(dest, path)
     if not make_parents(dest, path):
-        print(f"WARNING: {path} is under a symlinked directory; omitted it.")
+        print(f"WARNING: {path} is under a path that is a symlink or a file in the "
+              f"reviewed tree; omitted it.")
         return
     if mode == SYMLINK:
         os.symlink(os.fsdecode(data), full)

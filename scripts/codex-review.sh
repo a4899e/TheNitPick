@@ -105,12 +105,26 @@ WARNINGS=$(python3 -I "$(dirname "$0")/materialize.py" "$REPO" "$WT" "$REF" "$BA
 [[ -z $WARNINGS ]] || WARNINGS+=$'\n'
 
 for link in "${LINKS[@]}"; do
-  # Never reuse a path the branch already has: ln would follow a tracked
-  # symlink there and write outside the worktree.
+  # Never reuse a path the branch already has, and never pass through a
+  # symlink on the way to it. ln would follow a tracked symlink, at any depth,
+  # and write outside the worktree.
+  if [[ $link == /* || /$link/ == */../* ]]; then
+    echo "--link $link: must be a relative path inside the repo" >&2; exit 2
+  fi
   if [[ -e "$WT/$link" || -L "$WT/$link" ]]; then
     echo "--link $link: the reviewed tree already has that path; refusing to link over it" >&2
     exit 2
   fi
+  parent=$WT
+  IFS=/ read -r -a parts <<< "$(dirname "$link")"
+  for part in "${parts[@]}"; do
+    [[ $part == . || -z $part ]] && continue
+    parent="$parent/$part"
+    if [[ -L $parent || ( -e $parent && ! -d $parent ) ]]; then
+      echo "--link $link: $parent is a symlink or file in the reviewed tree; refusing" >&2; exit 2
+    fi
+  done
+  mkdir -p "$(dirname "$WT/$link")"
   ln -s "$REPO/$link" "$WT/$link"
   # An editable or src-layout install in a linked venv imports the main
   # checkout's code, not the worktree's. Reproductions would then test the
