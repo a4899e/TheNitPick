@@ -2,15 +2,66 @@
 
 A [Claude Code](https://claude.com/claude-code) skill that reviews your branch before it becomes a pull request. Claude reviews first, then Codex. Claude checks each finding, fixes the real ones with tests that show the fix works, and opens one PR when the review comes back clean.
 
-## What does this do?
+## How to use it
 
-When a branch is ready for a PR, TheNitPick runs a review loop on your machine, before anything is pushed:
+Install it (see [Install](#install)), then use one of the two prompts below. You never need to commit, push or start a reviewer by hand. Claude does all of that, and asks you only when a finding needs your judgment.
+
+### You already have changes, and want them reviewed and turned into a PR
+
+Your changes can be uncommitted, committed on a branch, or both. In Claude Code, from the repository:
+
+```text
+/thenitpick
+```
+
+Or in plain words, which works the same:
+
+```text
+Run TheNitPick on my changes on this branch. Commit anything uncommitted,
+run the review loop, and open the PR against main when the review is clean.
+```
+
+If you've already committed and only want the review and the PR, say so:
+
+```text
+My commits on this branch are done. Run TheNitPick on the branch against main
+and open the PR when it's clean.
+```
+
+### You want Claude to build something, and review it on the way to the PR
+
+Name the work, and ask for TheNitPick before the PR:
+
+```text
+Implement <the feature or fix>. When it's working and the tests pass, use the
+thenitpick skill to get it ready for a PR: commit, run the review loop, fix
+what it finds, then push once and open the PR.
+```
+
+To make this the default for every PR in a project, so you don't have to ask each time, add this to the project's `CLAUDE.md` (or to `~/.claude/CLAUDE.md` for all your projects):
+
+```markdown
+## Pull requests
+Before opening any pull request, use the thenitpick skill: commit the work,
+run its review loop until it's clean, then push once and open the PR with
+its review packet.
+```
+
+### What you'll hear about
+
+- A finding Claude can't settle on evidence alone, and needs you to decide.
+- A review that isn't converging. The loop stops after 5 Codex cycles and summarizes what keeps coming up, and you decide whether to keep going, change approach, or open the PR anyway.
+- The PR, once it's open.
+
+## What happens behind the scenes
+
+When the change is ready, TheNitPick runs a review loop on your machine, before anything is pushed:
 
 1. **Claude reviews the change** once (`/code-review high`) and fixes what's real.
-2. **You commit**, with all your pre-commit hooks passing.
+2. **The work is committed.** Claude commits it, unless you've already committed it yourself. Your pre-commit hooks must pass.
 3. **Codex reviews the whole branch** using its Review Agent, a defect-first reviewer that reports only concrete, actionable findings, ranked P0–P3. It runs in a disposable, locked-down copy of your repo where it can run your tests.
-4. **Claude settles each finding on evidence.** It reproduces the bug with a test that fails, fixes it, and confirms the test passes. If it disagrees with a finding, it needs a failed reproduction or a targeted Codex re-check before it may decline it.
-5. **Codex re-reviews**, up to 5 cycles. If the review isn't converging, the loop stops and explains why, so you can decide what to do.
+4. **Claude settles each finding on evidence.** It reproduces the bug with a test that fails, fixes it, confirms the test passes, and commits the fix. If it disagrees with a finding, it needs a failed reproduction or a targeted Codex re-check before it may decline it.
+5. **Codex re-reviews**, up to 5 cycles, until a cycle comes back clean.
 6. **One push, one PR**, with a single "review packet" comment: every finding, how it was resolved, the fixing commit, and what wasn't verified.
 
 Every run is logged to a local SQLite database: time spent, tokens used, findings by severity and outcome, and bugs that escaped review. Over time you can see whether the loop pays for itself.
@@ -57,17 +108,7 @@ Claude Code picks the skill up automatically. Invoke it with `/thenitpick`, or t
 
 If the `codex` binary isn't on your `PATH`, set `THENITPICK_CODEX` to its location.
 
-## Usage
-
-```text
-> /thenitpick
-```
-
-Claude takes it from there. You'll hear from it when:
-
-- a finding needs your judgment;
-- the loop isn't converging (it stops and summarizes what keeps coming up);
-- the PR is open.
+## Metrics
 
 To see what the loop has done for you over time:
 

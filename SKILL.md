@@ -33,6 +33,8 @@ Everything is standard-library Python (3.9+) plus git and the Codex CLI. It runs
    - Fix what is real.
 
    Do this once per PR only, not every cycle. Skip it for trivial diffs: docs, version bumps, or roughly under 30 changed lines.
+
+   If the user already committed the work, run it on the branch's commits instead. With no target, `/code-review` covers commits ahead of upstream plus anything uncommitted. Then go straight to step 5 if nothing new needs committing.
 4. **Commit.** Every pre-commit hook must pass. Never use `--no-verify`. Never start Codex on a commit whose hooks failed.
 5. **Codex review, cycle N.**
    - Wrap it in `cycle-start --run <id> --reviewer codex --model gpt-6.1-sol --effort high --sha <HEAD>` / `cycle-end --cycle <id> --tokens <n>`. `<n>` is the `=== tokens=` line the wrapper appends to the output file, taken from Codex's own `tokens used` total.
