@@ -6,12 +6,13 @@
 #                   [--link .venv]... [--codex BIN] [--model M] [--effort E] [--keep]
 #
 # What it does:
-#   1. Creates a throwaway worktree of REF (detached) beside OUT.
-#   2. Pins agent-instruction files to BASE. AGENTS.md, AGENTS.override.md and
-#      CLAUDE.md anywhere, plus .codex, .agents and .claude at the root
-#      (directories or symlinks), are replaced with the BASE copies, or deleted
-#      when BASE has none. Codex auto-loads these from its working tree, so
-#      without this the branch under review could rewrite its own reviewer's
+#   1. Registers a throwaway worktree of REF beside OUT, with no checkout.
+#   2. Writes REF's files from raw objects (materialize.py). No hook, attribute
+#      or filter ever runs on branch content. Agent-instruction files come from
+#      BASE instead of REF: AGENTS.md, AGENTS.override.md and CLAUDE.md
+#      anywhere, plus .codex, .agents and .claude at the root. A symlinked one
+#      is resolved in the BASE tree. Codex auto-loads these from its working
+#      tree, so without this the branch could rewrite its own reviewer's
 #      instructions.
 #   3. Runs Codex with:
 #        - an emptied environment (no cloud or API credentials from the shell)
@@ -26,7 +27,8 @@
 #   4. Afterwards appends to OUT every file Codex created, changed or deleted
 #      in the worktree (a content-hash comparison, ignored files included),
 #      then deletes the worktree (unless --keep).
-#   All git commands on the worktree run with hooks and fsmonitor disabled.
+#   Git commands run with hooks and fsmonitor disabled. Codex gets a per-run
+#   TMPDIR that is deleted afterwards.
 #
 # Two modes:
 #   default         A full review of REF against BASE. --context-file adds
@@ -38,7 +40,7 @@
 #   Never put reviewer output or repository text in either file. It reaches
 #   Codex as part of the prompt.
 set -euo pipefail
-export LC_ALL=C  # sort and comm must agree on collation
+export LC_ALL=C  # stable sort order for the before/after manifests
 
 CODEX=/usr/lib/chatgpt/resources/codex
 BASE=origin/main
@@ -74,72 +76,41 @@ WT="$(dirname "$OUT")/wt-$(basename "$OUT" .txt)"
 LISTS=$(mktemp -d)
 if command -v sha256sum > /dev/null; then SHA=(sha256sum); else SHA=(shasum -a 256); fi
 
-# Every git command that touches the worktree runs with hooks and fsmonitor
-# off, and reads attributes from an empty tree. Otherwise branch code could run
-# here, before any pinning, scrubbing or sandboxing: a core.hooksPath pointing
-# at a tracked directory runs the branch's post-checkout hook, and the branch's
-# .gitattributes can route files through a configured smudge or process filter.
-# With no attributes, files are checked out byte-for-byte.
-# GIT_ATTR_SOURCE needs git 2.42 or later; older git silently ignores it.
-GIT_VERSION=$(git --version | awk '{print $3}')
-if ! printf '2.42\n%s\n' "$GIT_VERSION" | sort -V -C; then
-  echo "git $GIT_VERSION is too old: 2.42+ is needed to keep checkout filters from running" >&2
-  exit 2
-fi
-EMPTY_TREE=$(git -C "$REPO" hash-object -t tree /dev/null)
-g() { GIT_ATTR_SOURCE=$EMPTY_TREE git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
+# The worktree is never checked out by git. Checkout consults hooks, attributes
+# (from .gitattributes, core.attributesFile and info/attributes) and the smudge
+# and process filters they select, so branch code could run here before any
+# scrubbing or sandboxing. Instead git registers an empty worktree, and
+# materialize.py writes every file byte-for-byte from raw objects. The git
+# commands below don't read attributes, and hooks and fsmonitor stay off.
+g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
 
 if [[ $BASE == origin/* ]]; then g -C "$REPO" fetch -q origin "${BASE#origin/}"; fi
 g -C "$REPO" rev-parse -q --verify "$BASE^{commit}" > /dev/null \
   || { echo "base $BASE does not resolve to a commit" >&2; exit 2; }
-g -C "$REPO" worktree add -q --detach "$WT" "$REF"
+g -C "$REPO" worktree add -q --no-checkout --detach "$WT" "$REF"
 cleanup() {
   rm -rf "$LISTS"
   [[ $KEEP == 1 ]] || g -C "$REPO" worktree remove --force "$WT"
 }
 trap cleanup EXIT
+# The index matches REF so git inside the review sees a clean tree. read-tree
+# without -u doesn't touch files or run filters.
+g -C "$WT" read-tree "$REF"
 
-# 2. Pin agent-instruction files to BASE. The listings go to files first, so a
-# git failure stops the script (set -e) instead of silently pinning nothing.
+# 2. Write the files. Agent-instruction paths come from BASE, and symlinked
+# ones are resolved in the BASE tree. See materialize.py.
 PINNED='(^|/)(AGENTS\.md|AGENTS\.override\.md|CLAUDE\.md)$|^\.(codex|agents|claude)(/|$)'
-pinned() {  # NUL-separated paths in, the pinned ones out
-  local path
-  while IFS= read -r -d '' path; do
-    if [[ $path =~ $PINNED ]]; then printf '%s\0' "$path"; fi
-  done
-}
-g -C "$WT" ls-files -z > "$LISTS/head"
-g -C "$WT" ls-tree -r -z --name-only "$BASE" > "$LISTS/base"
-pinned < "$LISTS/head" > "$LISTS/head-pinned"
-pinned < "$LISTS/base" > "$LISTS/base-pinned"
-while IFS= read -r -d '' path; do rm -rf -- "${WT:?}/$path"; done < "$LISTS/head-pinned"
-while IFS= read -r -d '' path; do g -C "$WT" checkout -q "$BASE" -- "$path"; done \
-  < "$LISTS/base-pinned"
-
-# A pinned file that is a symlink on BASE (AGENTS.md -> RULES.md) would still
-# deliver the branch's version of its target. Replace each such link with the
-# target's content as of BASE. Fail closed (delete it, and warn) when the
-# target leaves the repo, is itself a link, or is absent on BASE.
-WARNINGS=""
-# The target is resolved purely as a path in the BASE tree, never through the
-# reviewed filesystem, whose symlinks the branch controls.
-while IFS= read -r -d '' path; do
-  [[ $(g -C "$WT" ls-tree "$BASE" -- "$path" | awk '{print $1}') == 120000 ]] || continue
-  dest=$(g -C "$WT" cat-file blob "$BASE:$path")
-  rel=$(python3 -I -c 'import posixpath, sys
-print(posixpath.normpath(posixpath.join(posixpath.dirname(sys.argv[1]), sys.argv[2])))' "$path" "$dest")
-  # A missing path or a path through a symlinked directory gives no ls-tree
-  # entry, so it fails closed below.
-  mode=$(g -C "$WT" ls-tree "$BASE" -- "$rel" | awk '{print $1}')
-  rm -f -- "${WT:?}/$path"
-  if [[ $dest == /* || $rel == /* || $rel == ../* || $rel == .. || $mode != 100* ]]; then
-    WARNINGS+="=== WARNING: pinned $path is a symlink to $dest, which can't be pinned from $BASE; removed it."$'\n'
-  else
-    g -C "$WT" show "$BASE:$rel" > "$WT/$path"
-  fi
-done < "$LISTS/base-pinned"
+WARNINGS=$(python3 -I "$(dirname "$0")/materialize.py" "$REPO" "$WT" "$REF" "$BASE" "$PINNED" \
+  | sed 's/^/=== /')
+[[ -z $WARNINGS ]] || WARNINGS+=$'\n'
 
 for link in "${LINKS[@]}"; do
+  # Never reuse a path the branch already has: ln would follow a tracked
+  # symlink there and write outside the worktree.
+  if [[ -e "$WT/$link" || -L "$WT/$link" ]]; then
+    echo "--link $link: the reviewed tree already has that path; refusing to link over it" >&2
+    exit 2
+  fi
   ln -s "$REPO/$link" "$WT/$link"
   # An editable or src-layout install in a linked venv imports the main
   # checkout's code, not the worktree's. Reproductions would then test the
@@ -179,7 +150,7 @@ against base branch $BASE. Review the committed changes: git diff \$(git merge-b
 Agent-instruction files (AGENTS.md, CLAUDE.md, .codex, .agents, .claude) in the working tree were \
 reset to $BASE on purpose, so the branch cannot change your instructions. Ignore those working-tree \
 differences, but do review any committed changes to them. Read CLAUDE.md for the project's rules. \
-Run tests or repro scripts as needed (for Python projects: PYTHONDONTWRITEBYTECODE=1 \
+Put any scratch files under \$TMPDIR. Run tests or repro scripts as needed (for Python projects: PYTHONDONTWRITEBYTECODE=1 \
 .venv/bin/python -m pytest -p no:cacheprovider), but do not modify tracked files. For every \
 finding based on running code, give the exact command and its output. Return every actionable finding."
   if [[ -n $CONTEXT ]]; then
@@ -189,7 +160,8 @@ fi
 
 # 3. Run Codex with a scrubbed environment and a locked-down sandbox.
 set +e
-env -i HOME="$HOME" PATH="$PATH" LANG="${LANG:-C.UTF-8}" TERM=dumb \
+mkdir -p "$LISTS/tmp"
+env -i HOME="$HOME" PATH="$PATH" LANG="${LANG:-C.UTF-8}" TERM=dumb TMPDIR="$LISTS/tmp" \
   "$CODEX" exec --ignore-user-config --ignore-rules --ephemeral --disable memories \
     -m "$MODEL" -c model_reasoning_effort="\"$EFFORT\"" \
     -s workspace-write -c sandbox_workspace_write.network_access=false \

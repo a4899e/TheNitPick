@@ -112,13 +112,13 @@ Use the wrapper. Don't call `codex` by hand.
 
 - `--base` defaults to `origin/main`.
 - `--context-file` and `--recheck-file` hold only text Claude wrote. They reach Codex as part of the prompt.
-- `--link` exposes the project's test runtime, for example `.venv`, by symlinking it from the main checkout.
+- `--link` exposes the project's test runtime, for example `.venv`, by symlinking it from the main checkout. The wrapper refuses if the reviewed tree already has that path, since a tracked symlink there would redirect the link outside the worktree.
   - **Editable installs.** If that venv holds an editable install of the project (a `pip install -e .` .pth or `direct_url.json` pointing at the main checkout), code run in the worktree imports the *main checkout*, not the code under review. The wrapper prints a warning when it detects this. Then either rely on the project's own path setup (for example a conftest that puts the worktree's source first), or give Codex a venv built inside the worktree.
 
 The wrapper:
 
-- **Isolates the review.** It creates a throwaway worktree beside the output file and removes it afterwards.
-- **Pins agent instructions to the base.** `AGENTS.md`, `AGENTS.override.md` and `CLAUDE.md` (anywhere in the tree), and `.codex`, `.agents` and `.claude` at the root (directories or symlinks), are reset to the base branch, or deleted if the base has none. A base that doesn't resolve stops the run. Codex loads these from its working tree automatically, so a branch could otherwise rewrite its own reviewer's instructions; a published prompt-injection attack (Ghostcommit) used exactly that path. Committed changes to these files are still reviewed.
+- **Isolates the review without running git checkout.** It registers a throwaway worktree beside the output file, with no checkout. `scripts/materialize.py` then writes every file byte-for-byte from git's raw objects, so no hook, attribute (from `.gitattributes`, `core.attributesFile` or `info/attributes`), or smudge/process filter ever runs on branch content on the host. Nothing is written through a symlink. Codex gets a per-run `TMPDIR`, and everything is removed afterwards.
+- **Pins agent instructions to the base.** `AGENTS.md`, `AGENTS.override.md` and `CLAUDE.md` (anywhere in the tree), and `.codex`, `.agents` and `.claude` at the root (directories or symlinks), come from the base branch. They are omitted if the base has none. A symlinked one is resolved as a path in the base tree, and is omitted with a warning if it can't be safely resolved. A base that doesn't resolve stops the run. Codex loads these from its working tree automatically, so a branch could otherwise rewrite its own reviewer's instructions; a published prompt-injection attack (Ghostcommit) used exactly that path. Committed changes to these files are still reviewed.
 - **Locks Codex down.**
   - It runs with an emptied environment: only `HOME`, `PATH`, `LANG` and `TERM`, so no cloud or API credentials pass through.
   - The sandbox is `workspace-write` with network off.
