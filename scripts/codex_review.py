@@ -220,7 +220,14 @@ def manifest(wt: Path, head: str, links: list[str]) -> list[str]:
     """
     skip = {Path(link).as_posix() for link in links}
     lines = [f"HEAD {head}"]
-    for root, dirs, files in os.walk(wt, followlinks=False):
+
+    def unreadable(error: OSError) -> None:
+        # os.walk skips a directory it can't list. Record it, so a reviewer
+        # can't hide files by removing a directory's read permission.
+        where = Path(error.filename).relative_to(wt).as_posix() if error.filename else "?"
+        lines.append(f"E {where} unlistable:{error.errno}")
+
+    for root, dirs, files in os.walk(wt, followlinks=False, onerror=unreadable):
         root_path = Path(root)
         keep = []
         for name in dirs:
@@ -255,6 +262,20 @@ def manifest(wt: Path, head: str, links: list[str]) -> list[str]:
             if os.name != "nt":
                 lines.append(f"M {rel} {stat.S_IMODE(info.st_mode):o}")
     return sorted(lines)
+
+
+def restore_permissions(wt: Path) -> None:
+    """Give the owner rwx on every directory, so cleanup can delete what the reviewer locked."""
+    for root, dirs, _files in os.walk(wt, followlinks=False):
+        for name in dirs:
+            path = Path(root) / name
+            if not is_link(path):
+                try:
+                    os.chmod(path, stat.S_IRWXU)
+                except OSError:
+                    pass  # best effort; worktree removal reports what remains
+    # One pass suffices: os.walk is top-down, so each directory is unlocked
+    # before the walk lists it.
 
 
 def build_prompt(ref: str, base: str, context: str | None, recheck: str | None) -> str:
@@ -374,6 +395,7 @@ def run(args: argparse.Namespace) -> int:
         return status
     finally:
         if registered and not args.keep:
+            restore_permissions(wt)
             git.run(repo, "worktree", "remove", "--force", str(wt), check=False)
         shutil.rmtree(scratch, ignore_errors=True)
 
