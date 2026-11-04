@@ -139,7 +139,8 @@ def make_parents(dest: str, path: str) -> bool:
     return True
 
 
-def write_entry(dest: str, path: str, mode: str, data: bytes, warnings: list[str]) -> None:
+def write_entry(dest: str, path: str, mode: str, data: bytes, warnings: list[str],
+                tree_dirs: frozenset[str] = frozenset()) -> None:
     if unsafe_path(path):
         warnings.append(f"{path!r} is not a safe path on this platform; omitted it.")
         return
@@ -153,8 +154,13 @@ def write_entry(dest: str, path: str, mode: str, data: bytes, warnings: list[str
                         "reviewed tree; omitted it.")
         return
     if mode == SYMLINK:
+        target = os.fsdecode(data)
+        # Windows fixes a symlink's type (file or directory) at creation. The
+        # target may not exist yet, so decide from the tree whether it names a
+        # directory.
+        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(path), target))
         try:
-            os.symlink(os.fsdecode(data), full)
+            os.symlink(target, full, target_is_directory=resolved in tree_dirs)
             return
         except OSError:
             if os.name != "nt":
@@ -176,6 +182,9 @@ def materialize(repo: str, dest: str, ref: str, base: str, pinned_regex: str,
     pinned = re.compile(pinned_regex, re.IGNORECASE)
     head = tree_entries(git, repo, ref)
     base_tree = tree_entries(git, repo, base)
+    tree_dirs = frozenset(posixpath.dirname(path) for path in head) - {""}
+    tree_dirs = frozenset(prefix for path in tree_dirs
+                          for prefix in _prefixes(path))
     warnings: list[str] = []
     blobs = Blobs(git, repo)
     try:
@@ -188,10 +197,16 @@ def materialize(repo: str, dest: str, ref: str, base: str, pinned_regex: str,
                 if unsafe_path(path) or not make_parents(dest, path + "/_"):
                     warnings.append(f"submodule {path!r} can't be placed safely; omitted it.")
                 continue
-            write_entry(dest, path, mode, blobs.read(oid), warnings)
+            write_entry(dest, path, mode, blobs.read(oid), warnings, tree_dirs)
     finally:
         blobs.close()
     return warnings
+
+
+def _prefixes(path: str) -> list[str]:
+    """'a/b/c' -> ['a', 'a/b', 'a/b/c']."""
+    parts = path.split("/")
+    return ["/".join(parts[:index]) for index in range(1, len(parts) + 1)]
 
 
 def write_pinned(dest: str, base: str, base_tree: dict[str, tuple[str, str]],

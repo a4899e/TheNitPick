@@ -92,6 +92,28 @@ def find_codex(explicit: str | None) -> str:
                       "or put codex on PATH")
 
 
+#: Characters cmd.exe interprets even inside quoted arguments to a .cmd/.bat file.
+CMD_METACHARACTERS = set('&|<>^%!"\r\n()')
+
+
+def check_batch_arguments(codex: str, arguments: list[str]) -> None:
+    """Refuse to pass arguments through cmd.exe that it would reinterpret.
+
+    On Windows, an npm-installed Codex is a codex.cmd shim, and Python runs .cmd
+    and .bat files through cmd.exe, which re-parses the command line. The prompt
+    already goes in on stdin. This covers the remaining arguments, such as a
+    worktree path under a username containing '&'.
+    """
+    if os.name != "nt" or not codex.lower().endswith((".cmd", ".bat")):
+        return
+    for argument in arguments:
+        if CMD_METACHARACTERS & set(argument):
+            raise ReviewError(
+                f"argument {argument!r} contains characters cmd.exe would reinterpret, and "
+                f"Codex is a batch-file shim ({codex}). Point THENITPICK_CODEX at codex.exe, "
+                "or write --out under a path without & | < > ^ % ! \" ( )")
+
+
 class Git:
     """git with hooks and fsmonitor off. Hooks point at an empty directory."""
 
@@ -107,8 +129,12 @@ class Git:
 
 def check_link(wt: Path, link: str) -> None:
     """Refuse a --link that could be redirected outside the worktree."""
-    parts = Path(link).parts
-    if Path(link).is_absolute() or ".." in parts or not parts:
+    as_path = Path(link)
+    parts = as_path.parts
+    # is_absolute() is False on Windows for "/x" (rooted) and "D:x" (drive-
+    # relative), but joining either to the worktree leaves it. Refuse any root
+    # or drive.
+    if as_path.is_absolute() or as_path.root or as_path.drive or ".." in parts or not parts:
         raise ReviewError(f"--link {link}: must be a relative path inside the repo")
     if os.path.lexists(wt / link):
         raise ReviewError(f"--link {link}: the reviewed tree already has that path; "
@@ -152,9 +178,20 @@ def editable_install_warning(repo: Path, link: str) -> str | None:
 
 
 def is_link(path: Path) -> bool:
-    """A symlink, or on Windows a directory junction (which is_symlink misses)."""
-    isjunction = getattr(os.path, "isjunction", None)  # Python 3.12+
-    return path.is_symlink() or bool(isjunction and isjunction(path))
+    """A symlink, or on Windows any reparse point such as a junction.
+
+    is_symlink() misses junctions, and os.path.isjunction exists only from
+    Python 3.12, so on Windows check the reparse-point attribute directly.
+    """
+    if path.is_symlink():
+        return True
+    if os.name == "nt":
+        try:
+            attributes = getattr(path.lstat(), "st_file_attributes", 0)
+        except OSError:
+            return False
+        return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return False
 
 
 def file_digest(path: Path) -> str:
@@ -298,6 +335,7 @@ def run(args: argparse.Namespace) -> int:
         # The prompt goes in on stdin ("-"), never on the command line. On
         # Windows, codex.cmd runs through cmd.exe, which would cut a multi-line
         # argument at the first newline and interpret % & | in it.
+        check_batch_arguments(codex, command[1:])
         prompt = build_prompt(args.ref, args.base, context, recheck)
         with open(out, "w", encoding="utf-8") as handle:
             status = subprocess.run(command, input=prompt.encode("utf-8"), stdout=handle,
@@ -308,7 +346,9 @@ def run(args: argparse.Namespace) -> int:
         added = sorted(set(after) - set(before))
         output = out.read_text(encoding="utf-8", errors="replace")
         mode = "recheck" if recheck is not None else "review"
-        with open(out, "a", encoding="utf-8") as handle:
+        # Filenames can hold bytes that aren't UTF-8 (surrogate-escaped by
+        # os.walk). Escape them rather than crash before the report is written.
+        with open(out, "a", encoding="utf-8", errors="backslashreplace") as handle:
             handle.write("\n")
             for warning in warnings:
                 handle.write(f"=== WARNING: {warning}\n")
