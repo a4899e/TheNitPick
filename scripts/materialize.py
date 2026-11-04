@@ -56,7 +56,10 @@ REGULAR = ("100644", "100755")
 
 #: git with fsmonitor off. Callers that also disable hooks pass their own prefix.
 DEFAULT_GIT = ["git", "-c", "core.fsmonitor=false"]
-WINDOWS_RESERVED = re.compile(r"^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$", re.IGNORECASE)
+WINDOWS_RESERVED = re.compile(r"^(con|prn|aux|nul|com[0-9\u00b9\u00b2\u00b3]|lpt[0-9\u00b9\u00b2\u00b3])"
+                              r"(\..*)?$", re.IGNORECASE)
+#: Characters Win32 forbids in a file name (plus control characters 0-31).
+WINDOWS_INVALID = set('<>:"\\|?*') | {chr(code) for code in range(32)}
 
 
 def unsafe_path(path: str) -> bool:
@@ -66,7 +69,7 @@ def unsafe_path(path: str) -> bool:
             return True
         # Backslashes and colons are ordinary filename characters on POSIX, but
         # path separators, drive prefixes or stream names on Windows.
-        if os.name == "nt" and ("\\" in part or ":" in part or WINDOWS_RESERVED.match(part)
+        if os.name == "nt" and (WINDOWS_INVALID & set(part) or WINDOWS_RESERVED.match(part)
                                 or part.endswith((".", " "))):
             return True
     return False
@@ -191,6 +194,14 @@ def write_entry(dest: str, path: str, mode: str, data: bytes, warnings: list[str
         warnings.append(f"{path} is under a path that is a symlink or a file in the "
                         "reviewed tree; omitted it.")
         return
+    try:
+        _create(full, path, mode, data, tree_dirs, links)
+    except OSError as error:
+        warnings.append(f"{path!r} couldn't be created here ({error.strerror}); omitted it.")
+
+
+def _create(full: str, path: str, mode: str, data: bytes, tree_dirs: frozenset[str],
+            links: dict[str, str] | None) -> None:
     if mode == SYMLINK:
         target = os.fsdecode(data)
         # Windows fixes a symlink's type (file or directory) at creation. The
@@ -220,7 +231,10 @@ def materialize(repo: str, dest: str, ref: str, base: str, pinned_regex: str,
     pinned = re.compile(pinned_regex, re.IGNORECASE)
     head = tree_entries(git, repo, ref)
     base_tree = tree_entries(git, repo, base)
-    tree_dirs = frozenset(posixpath.dirname(path) for path in head) - {""}
+    # Every directory the tree implies, plus submodule roots (which become
+    # directories), so links to them get the directory type on Windows.
+    tree_dirs = (frozenset(posixpath.dirname(path) for path in head)
+                 | frozenset(path for path, (mode, _oid) in head.items() if mode == GITLINK)) - {""}
     tree_dirs = frozenset(prefix for path in tree_dirs
                           for prefix in _prefixes(path))
     links: dict[str, str] = {}
