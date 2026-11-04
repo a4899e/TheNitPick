@@ -132,7 +132,7 @@ These protections were hardened by running TheNitPick on itself. See PR #1. Code
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+Copyright 2026 Trevor Tonn. Licensed under the Apache License 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 ## Future ideas
 
