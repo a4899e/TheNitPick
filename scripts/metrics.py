@@ -223,13 +223,15 @@ def _resolve_cycle(conn: sqlite3.Connection, args: argparse.Namespace, *,
     """The run and cycle a command acts on.
 
     ``--cycle`` names one directly, and must belong to the named run if one is
-    named. Otherwise it is the run's one open cycle (``open_only``), or its
+    named. Its run may have ended, so a count or a late finding can still be
+    corrected after ``run-end``. Otherwise it is the run's one open cycle (``open_only``), or its
     latest cycle, which must have ended: an open latest cycle means the
     findings being recorded probably belong to the one before it.
     """
     if args.cycle is not None:
         cycle = _require(conn, "cycles", args.cycle)
-        return _owning_run(conn, args, f"cycle {cycle['id']}", cycle["run_id"]), cycle
+        run = _owning_run(conn, args, f"cycle {cycle['id']}", cycle["run_id"], allow_ended=True)
+        return run, cycle
     run = _resolve_run(conn, args)
     if open_only:
         rows = conn.execute("SELECT * FROM cycles WHERE run_id = ? AND ended_at IS NULL"

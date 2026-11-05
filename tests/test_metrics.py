@@ -114,6 +114,18 @@ class MetricsTest(unittest.TestCase):
         fixed = self.ok("cycle-end", *SEL, "--cycle", cycle, "--tokens", "99", "--replace-tokens")
         self.assertEqual(fixed["tokens"], 99)
 
+    def test_tokens_can_be_corrected_after_the_run_ends(self) -> None:
+        self.ok("run-start", *SEL)
+        cycle = str(self.start_cycle()["cycle"])
+        self.ok("cycle-end", *SEL, "--tokens", "1234")
+        self.ok("run-end", *SEL, "--outcome", "clean")
+        fixed = self.ok("cycle-end", *SEL, "--cycle", cycle, "--tokens", "99", "--replace-tokens")
+        self.assertEqual(fixed["tokens"], 99)
+        self.ok("run-start", "--repo", "Other", "--branch", "b")
+        self.assertIn("belongs to run", self.refused(
+            "cycle-end", "--repo", "Other", "--branch", "b", "--cycle", cycle,
+            "--tokens", "5", "--replace-tokens"))
+
     # -- ending a run -----------------------------------------------------------
 
     def test_pr_url_can_be_added_after_a_cap(self) -> None:
