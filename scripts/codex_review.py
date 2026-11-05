@@ -27,11 +27,14 @@ What it does:
    - a per-run TMPDIR;
    - the given model and effort.
 4. **Reports every file Codex created, changed or deleted** in the worktree.
-   This is a content-hash comparison, with modes included on POSIX. Then it
-   deletes the worktree (unless --keep).
+   This is a content-hash comparison, with modes included on POSIX. Changes
+   to the reviewed tree come first, each listed. New files follow: those the
+   ignore rules don't match each listed, gitignored ones (build output)
+   counted per ignored directory, with the full list in OUT's sibling
+   ``<stem>-gitignored.txt``. Then it deletes the worktree (unless --keep).
 
-The output file ends with ``=== tokens=N`` (Codex's own total) and a status
-line.
+The output file ends with ``=== tokens=N`` (Codex's own total), a status
+line, and the edit report.
 
 Modes:
 
@@ -210,8 +213,8 @@ def file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def manifest(wt: Path, head: str, links: list[str]) -> list[str]:
-    """Hash and mode (POSIX) of every regular file, every link's target, and HEAD.
+def manifest(wt: Path, links: list[str]) -> dict[str, str]:
+    """Path -> state: hash and mode (POSIX) of every regular file, every link's target.
 
     Only regular files are opened. A FIFO, socket or device is recorded by type,
     so it can't block or crash the audit, and an unreadable file is recorded as
@@ -219,13 +222,13 @@ def manifest(wt: Path, head: str, links: list[str]) -> list[str]:
     paths this script made are skipped.
     """
     skip = {Path(link).as_posix() for link in links}
-    lines = [f"HEAD {head}"]
+    entries: dict[str, str] = {}
 
     def unreadable(error: OSError) -> None:
         # os.walk skips a directory it can't list. Record it, so a reviewer
         # can't hide files by removing a directory's read permission.
         where = Path(error.filename).relative_to(wt).as_posix() if error.filename else "?"
-        lines.append(f"E {where} unlistable:{error.errno}")
+        entries[where] = f"unlistable directory (errno {error.errno})"
 
     for root, dirs, files in os.walk(wt, followlinks=False, onerror=unreadable):
         root_path = Path(root)
@@ -247,21 +250,124 @@ def manifest(wt: Path, head: str, links: list[str]) -> list[str]:
                 continue
             if is_link(path):
                 try:
-                    lines.append(f"L {rel} -> {os.readlink(path)}")
+                    entries[rel] = f"link -> {os.readlink(path)}"
                 except OSError:
-                    lines.append(f"L {rel} -> (unreadable)")
+                    entries[rel] = "link -> (unreadable)"
                 continue
             info = path.lstat()
             if not stat.S_ISREG(info.st_mode):
-                lines.append(f"O {rel} type={stat.S_IFMT(info.st_mode):o}")
+                entries[rel] = f"special file type={stat.S_IFMT(info.st_mode):o}"
                 continue
             try:
-                lines.append(f"F {rel} {file_digest(path)}")
+                state = f"sha256:{file_digest(path)}"
             except OSError as error:
-                lines.append(f"F {rel} unreadable:{error.errno}")
+                state = f"unreadable (errno {error.errno})"
             if os.name != "nt":
-                lines.append(f"M {rel} {stat.S_IMODE(info.st_mode):o}")
-    return sorted(lines)
+                state += f" mode {stat.S_IMODE(info.st_mode):o}"
+            entries[rel] = state
+    return entries
+
+
+def ignored_paths(git: Git, wt: Path, paths: list[str]) -> set[str] | None:
+    """The subset of ``paths`` that the worktree's ignore rules match, or None if git can't say.
+
+    --no-index judges each path by the ignore rules alone, whatever the
+    reviewer did to the index. Each path goes in as "./path", so a name like
+    ":build" isn't read as pathspec magic and judged as a different path
+    (check-ignore refuses --literal-pathspecs).
+    edit_report stops trusting the answer when the reviewer touched a .gitignore.
+    """
+    if not paths:
+        return set()
+    data = b"".join(b"./" + os.fsencode(path) + b"\0" for path in paths)
+    result = subprocess.run(git.prefix + ["check-ignore", "--no-index", "--stdin", "-z"],
+                            check=False, cwd=wt, input=data, capture_output=True)
+    if result.returncode not in (0, 1):  # 1 means none of them is ignored
+        return None
+    # git echoes each matching path as given, "./" included.
+    return {os.fsdecode(path[2:] if path.startswith(b"./") else path)
+            for path in result.stdout.split(b"\0") if path}
+
+
+def _short(state: str) -> str:
+    return re.sub(r"(sha256:[0-9a-f]{12})[0-9a-f]+", r"\1…", state)
+
+
+def edit_report(before: dict[str, str], after: dict[str, str], head_before: str,
+                head_after: str, is_ignored) -> tuple[list[str], list[str]]:
+    """What the reviewer did to the worktree: (summary lines, gitignored files created).
+
+    The summary, most important first:
+
+    1. Changes to the reviewed tree (files REF provided, HEAD, a directory of
+       REF made unlistable): each listed. These are the warning sign.
+    2. New files the ignore rules don't match, such as a scratch test: each listed.
+    3. New gitignored files, such as build output: counted per ignored
+       directory. The second value lists them, for a separate file.
+
+    ``is_ignored`` maps a list of relative paths to the ignored subset, or None
+    if that can't be determined. Then, or when the reviewer created, changed or
+    deleted a .gitignore (which could ignore itself and what it hides), every
+    new file is listed under 2.
+    """
+    changed = sorted(path for path in before.keys() & after.keys() if before[path] != after[path])
+    deleted = sorted(before.keys() - after.keys())
+    created = sorted(after.keys() - before.keys())
+    # A directory REF provided that is now unlistable hides reviewed files. One
+    # the reviewer made (say, a permissions test under build/) is just new.
+    reviewed_dirs = {"/".join(path.split("/")[:i]) for path in before
+                     for i in range(1, path.count("/") + 1)}
+    unlistable = [path for path in created
+                  if after[path].startswith("unlistable") and path in reviewed_dirs]
+    created = [path for path in created if path not in unlistable]
+
+    # Group each ignored file under its shallowest ignored ancestor directory,
+    # or its own directory when only the file matches a pattern.
+    ancestors = sorted({"/".join(path.split("/")[:i]) for path in created
+                        for i in range(1, path.count("/") + 1)})
+    touched = [path for path in changed + deleted + created
+               if path.rsplit("/", 1)[-1] == ".gitignore"]
+    warnings = []
+    if touched:
+        warnings.append(f"=== WARNING: reviewer touched {touched[0]}; ignore rules not trusted, "
+                        f"every new file is listed\n")
+        ignored = set()
+    else:
+        ignored = is_ignored(created + ancestors)
+        if ignored is None:
+            warnings.append("=== WARNING: could not check .gitignore; every new file is listed\n")
+            ignored = set()
+    new_ignored, new_plain, groups = [], [], {}
+    for path in created:
+        parts = path.split("/")
+        under = next(("/".join(parts[:i]) for i in range(1, len(parts))
+                      if "/".join(parts[:i]) in ignored), None)
+        if under is None and path not in ignored:
+            new_plain.append(path)
+            continue
+        new_ignored.append(path)
+        group = (under if under is not None else "/".join(parts[:-1]) or ".") + "/"
+        groups[group] = groups.get(group, 0) + 1
+
+    lines = list(warnings)
+    if changed or deleted or unlistable or head_before != head_after:
+        lines.append("=== REVIEWER CHANGED THE REVIEWED TREE (read each; never carry one over):\n")
+        if head_before != head_after:
+            lines.append(f"HEAD moved: {head_before} -> {head_after}\n")
+        lines.extend(f"changed: {path}: {_short(before[path])} -> {_short(after[path])}\n"
+                     for path in changed)
+        lines.extend(f"deleted: {path}\n" for path in deleted)
+        lines.extend(f"now unlistable: {path}/\n" for path in unlistable)
+    else:
+        lines.append("=== reviewed tree unchanged by reviewer\n")
+    if new_plain:
+        lines.append(f"=== reviewer created {len(new_plain)} file(s) not gitignored:\n")
+        lines.extend(f"created: {path}\n" for path in new_plain)
+    if new_ignored:
+        lines.append(f"=== reviewer created {len(new_ignored)} gitignored file(s), "
+                     f"by ignored directory:\n")
+        lines.extend(f"{group}  {count}\n" for group, count in sorted(groups.items()))
+    return lines, new_ignored
 
 
 def restore_permissions(wt: Path) -> None:
@@ -353,7 +459,7 @@ def run(args: argparse.Namespace) -> int:
             if warning:
                 warnings.append(warning)
         head = git.run(wt, "rev-parse", "HEAD").strip()
-        before = manifest(wt, head, args.link)
+        before = manifest(wt, args.link)
 
         tmpdir = scratch / "tmp"
         tmpdir.mkdir()
@@ -373,9 +479,19 @@ def run(args: argparse.Namespace) -> int:
             status = subprocess.run(command, input=prompt.encode("utf-8"), stdout=handle,
                                     stderr=subprocess.STDOUT, env=codex_env(tmpdir)).returncode
 
-        after = manifest(wt, git.run(wt, "rev-parse", "HEAD").strip(), args.link)
-        removed = sorted(set(before) - set(after))
-        added = sorted(set(after) - set(before))
+        after = manifest(wt, args.link)
+        head_after = git.run(wt, "rev-parse", "HEAD", check=False).strip() or "(unresolvable)"
+        report, ignored_created = edit_report(before, after, head, head_after,
+                                              lambda paths: ignored_paths(git, wt, paths))
+        # The full list of build output goes to its own file, so it can't push
+        # the verdict, the status line and the summary away from the end of OUT.
+        listing = out.with_name(f"{out.stem}-gitignored.txt")
+        if ignored_created:
+            with open(listing, "w", encoding="utf-8", errors="backslashreplace") as handle:
+                handle.writelines(f"{path}\n" for path in ignored_created)
+            report.append(f"=== full list: {listing}\n")
+        else:
+            listing.unlink(missing_ok=True)
         output = out.read_text(encoding="utf-8", errors="replace")
         mode = "recheck" if recheck is not None else "review"
         # Filenames can hold bytes that aren't UTF-8 (surrogate-escaped by
@@ -387,12 +503,7 @@ def run(args: argparse.Namespace) -> int:
             handle.write(f"=== tokens={tokens_used(output)}\n")
             handle.write(f"=== codex_review.py: exit={status} mode={mode} ref={head} "
                          f"base={args.base} model={args.model} effort={args.effort}\n")
-            if removed or added:
-                handle.write("=== WORKTREE CHANGED BY REVIEWER:\n")
-                handle.writelines(f"removed or changed: {line}\n" for line in removed)
-                handle.writelines(f"now: {line}\n" for line in added)
-            else:
-                handle.write("=== worktree unchanged by reviewer\n")
+            handle.writelines(report)
         return status
     finally:
         if registered and not args.keep:

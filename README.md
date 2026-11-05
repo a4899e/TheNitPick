@@ -159,7 +159,7 @@ Codex reviews a throwaway worktree of your branch:
 - **No checkout.** Every file is written byte-for-byte from git's raw objects, so no hook, attribute, or smudge or process filter runs on branch content on your machine.
 - **Instructions come from the base branch.** Agent-instruction files are taken from the base branch, and nothing is ever written through a symlink.
 - **Codex is locked down.** It runs with a minimal environment (no cloud or API credentials), network off, writes confined to the worktree and a private temp directory, no user config or rules, no memories, and no persisted session.
-- **Edits are detected.** Anything Codex changes in the worktree is reported, and the worktree is deleted afterwards.
+- **Edits are detected.** Anything Codex changes in the worktree is reported, and the worktree is deleted afterwards. Changes to the reviewed files are listed first, one by one. Gitignored build output from running tests is counted per directory, so it doesn't bury them.
 
 These protections were hardened by running TheNitPick on itself. See PR #1. Codex raised 11 issues there, most of them ways a branch under review could run code on the host or steer its reviewer before the sandbox applied. The design changed until a full cycle found nothing.
 
@@ -168,6 +168,7 @@ These protections were hardened by running TheNitPick on itself. See PR #1. Code
 - Review recall is partial for every model and tool. TheNitPick lowers the odds of a bug slipping through; it doesn't make that impossible. Track escapes.
 - Claude both writes the fixes and settles the findings. That's why every decision has to rest on a reproduction or a Codex re-check rather than Claude's judgment alone.
 - Submodules appear as empty directories, and Git LFS files as their pointers.
+- With network off, Codex can't run tests that start a local server: the sandbox refuses even localhost listeners. Claude runs those tests itself, and the review packet says which ones Codex couldn't.
 - The loop runs locally, so teammates see the review packet but can't independently verify that the loop ran.
 
 ## Files
@@ -176,6 +177,7 @@ These protections were hardened by running TheNitPick on itself. See PR #1. Code
 - `scripts/codex_review.py`: runs one locked-down Codex review cycle.
 - `scripts/materialize.py`: builds the review worktree from raw git objects.
 - `scripts/metrics.py`: the metrics database and findings ledger.
+- `tests/`: standard-library tests. Run them with `python3 -m unittest discover -s tests`.
 
 ## License
 
